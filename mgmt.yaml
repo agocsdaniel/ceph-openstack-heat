@@ -1,0 +1,153 @@
+heat_template_version: 2017-02-24
+
+description: Management/jump host
+
+parameters:
+  public_net:
+    type: string
+    label: Public net
+    description: Public net pool name for floating ip
+    default: ext-net
+
+resources:
+  ssh_key_a:
+    type: OS::Nova::KeyPair
+    properties:
+      name: ssh_key_a
+      public_key: |
+        ssh-rsa AAAA... xxx@yyy.zz
+      save_private_key: false
+      
+  ssh_key_b:
+    type: OS::Nova::KeyPair
+    properties:
+      name: ssh_key_b
+      public_key: |
+        ssh-rsa AAAA... xxx@yyy.zz
+      save_private_key: false
+      
+  ssh_key_c:
+    type: OS::Nova::KeyPair
+    properties:
+      name: ssh_key_c
+      public_key: |
+        ssh-rsa AAAA... xxx@yyy.zz
+      save_private_key: false
+      
+      
+  
+  ssh_key_mgmt_admin:
+    type: OS::Nova::KeyPair
+    properties:
+      name: ssh_key_mgmt_admin
+      save_private_key: true
+      
+      
+
+  mgmt_internal_net:
+    type: OS::Neutron::Net
+    properties:
+      name: mgmt_internal_net
+      port_security_enabled: true
+      
+  mgmt_internal_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      name: mgmt_internal_subnet
+      network: { get_resource: mgmt_internal_net }
+      cidr: 192.168.255.0/24
+      
+  mgmt_public_network_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: mgmt_public_network_security_group
+      rules:
+        - direction: egress
+          protocol: icmp
+          remote_ip_prefix: 0.0.0.0/0
+        - direction: egress
+          protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+        - direction: egress
+          protocol: udp
+          remote_ip_prefix: 0.0.0.0/0
+        - direction: ingress
+          protocol: tcp
+          remote_ip_prefix: 0.0.0.0/0
+          port_range_min: 22
+          port_range_max: 22
+        
+          
+  mgmt_internal_port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: mgmt_internal_net }
+      fixed_ips:
+        - ip_address: 192.168.255.254
+      security_groups:
+        - { get_resource: mgmt_public_network_security_group }
+      
+  mgmt_router:
+    type: OS::Neutron::Router
+    properties:
+      external_gateway_info:
+        network: { get_param: public_net }
+      
+  mgmt_router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: { get_resource: mgmt_router }
+      subnet: { get_resource: mgmt_internal_subnet }
+      
+  mgmt_public_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: public_net }
+      port_id: { get_resource: mgmt_internal_port }
+
+  mgmt_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ungrouped
+      config: 
+        str_replace:
+          template: |
+            #!/bin/bash
+            
+            echo "$ssh_pub_keys" | tee /root/.ssh/authorized_keys
+            
+            # add admin private key to root
+            echo "$ssh_priv_key" | tee /root/.ssh/id_rsa
+            chmod 600 /root/.ssh/id_rsa
+            ssh-keygen -p -N "" -f /root/.ssh/id_rsa
+            ssh-keygen -y -f /root/.ssh/id_rsa | tee /root/.ssh/id_rsa.pub
+            
+            echo "Host *" | tee -a /etc/ssh/ssh_config
+            echo "  SendEnv LANG LC_*" | tee -a /etc/ssh/ssh_config
+            echo "  ForwardAgent yes" | tee -a /etc/ssh/ssh_config
+            
+            cp -f /root/.ssh/authorized_keys /root/.ssh/id_rsa /root/.ssh/id_rsa.pub /home/ubuntu/.ssh/
+            chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+            
+          params:
+            $ssh_priv_key: { get_attr: [ ssh_key_mgmt_admin, private_key ] }
+            $ssh_pub_keys: 
+              list_join:
+                - ''
+                - 
+                  - { get_attr: [ ssh_key_a, public_key ] }
+                  - { get_attr: [ ssh_key_b, public_key ] }
+                  - { get_attr: [ ssh_key_c, public_key ] }
+  
+  mgmt_server:
+    type: OS::Nova::Server
+    properties:
+      name: mgmt_server
+      key_name: { get_resource: ssh_key_a }
+      image: ubuntu-focal
+      flavor: m1.small
+      networks:
+        - port: { get_resource: mgmt_internal_port }
+      user_data_format: RAW
+      user_data: { get_resource: mgmt_config }
+        
